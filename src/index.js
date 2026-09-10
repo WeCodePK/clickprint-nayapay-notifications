@@ -67,7 +67,7 @@ async function extract(html) {
     .transform(new Response(html))
     .arrayBuffer();
 
-  const sections = [];
+  const fields = new Map();
   let timestamp = null;
   let pendingLabel = null;
 
@@ -76,47 +76,43 @@ async function extract(html) {
 
     if (node.kind === "summary") {
       if (/\d{1,2} \w{3} \d{4}, \d{1,2}:\d{2} [AP]M/i.test(text)) timestamp = text;
-      continue;
-    }
-
-    if (node.kind === "section") {
-      sections.push({ title: titleCase(text), rows: [] });
+    } else if (node.kind === "section") {
       pendingLabel = null;
-      continue;
-    }
-
-    if (!sections.length) sections.push({ title: null, rows: [] });
-
-    if (pendingLabel === null) {
-      pendingLabel = text;
+    } else if (pendingLabel === null) {
+      pendingLabel = text.toLowerCase();
     } else {
-      sections[sections.length - 1].rows.push([pendingLabel, text]);
+      if (!fields.has(pendingLabel)) fields.set(pendingLabel, text);
       pendingLabel = null;
     }
   }
 
-  return { timestamp, sections: sections.filter((s) => s.rows.length) };
+  return { timestamp, fields };
 }
 
 async function serialise(email) {
-  const lines = [`*${clean(email.subject || "NayaPay notification")}*`];
-
-  const { timestamp, sections } = email.html
+  const subject = clean(email.subject || "NayaPay notification");
+  const { timestamp, fields } = email.html
     ? await extract(email.html)
-    : { timestamp: null, sections: [] };
+    : { timestamp: null, fields: new Map() };
+  const get = (label) => fields.get(label);
 
-  if (timestamp) lines.push(timestamp);
+  // The other party is the source on money received and the destination on money sent,
+  // so your own account never shows up in the notification.
+  const side = /^you sent/i.test(subject) ? "destination" : "source";
+  const party = [
+    get(`${side} acc. title`),
+    get(`${side} bank`),
+    get(`${side} acc. number`) ?? get("raast id / iban"),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
-  if (sections.length) {
-    for (const section of sections) {
-      lines.push("");
-      if (section.title) lines.push(`*${section.title}*`);
-      for (const [label, value] of section.rows) lines.push(`${label}: ${value}`);
-    }
-  } else {
+  const lines = [`*${subject}*`, timestamp, party, get("transaction id")].filter(Boolean);
+
+  if (lines.length === 1) {
     // Template changed or a non-transaction email: send readable body rather than nothing.
     const body = clean(email.text || stripTags(email.html || ""));
-    if (body) lines.push("", body.slice(0, 1500));
+    if (body) lines.push(body.slice(0, 1500));
   }
 
   return lines.join("\n");
@@ -147,10 +143,6 @@ async function postWithRetry(env, text) {
 
 function clean(s) {
   return decodeEntities(s).replace(/\s+/g, " ").trim();
-}
-
-function titleCase(s) {
-  return s.toLowerCase().replace(/\b\p{L}/gu, (c) => c.toUpperCase());
 }
 
 function stripTags(html) {
